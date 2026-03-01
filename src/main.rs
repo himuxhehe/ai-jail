@@ -48,8 +48,11 @@ fn run() -> Result<i32, String> {
     let project_dir = std::env::current_dir()
         .map_err(|e| format!("Cannot determine current directory: {e}"))?;
 
-    // Save config (creates .ai-jail on first run, updates on subsequent runs)
-    config::save(&config);
+    // Save config in normal mode. In lockdown mode avoid host writes unless user
+    // explicitly requested persistence via --init.
+    if !config.lockdown_enabled() {
+        config::save(&config);
+    }
 
     // Handle dry run
     if cli.dry_run {
