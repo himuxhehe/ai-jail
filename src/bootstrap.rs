@@ -1,5 +1,6 @@
 use crate::output;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // ── Permission lists (shared philosophy) ─────────────────────────
@@ -143,15 +144,74 @@ pub fn run(verbose: bool) -> Result<(), String> {
     Ok(())
 }
 
-// ── Backup ───────────────────────────────────────────────────────
+// ── Safe file helpers ─────────────────────────────────────────────
+
+fn ensure_regular_file_or_absent(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                return Err(format!("{} is a symlink — refusing to write", path.display()));
+            }
+            if !ft.is_file() {
+                return Err(format!("{} exists but is not a regular file", path.display()));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Cannot stat {}: {e}", path.display())),
+    }
+}
+
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = fs::create_dir_all(parent) {
+        return Err(format!("Cannot create directory {}: {e}", parent.display()));
+    }
+
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bootstrap");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(".{stem}.tmp.{}.{}", std::process::id(), nonce));
+
+    let mut f = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp_path)
+        .map_err(|e| format!("Failed to create temp file {}: {e}", tmp_path.display()))?;
+
+    if let Err(e) = f.write_all(contents.as_bytes()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+    if let Err(e) = f.sync_all() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+    drop(f);
+
+    fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("Failed to rename temp file to {}: {e}", path.display())
+    })
+}
 
 fn backup_file(path: &Path) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
     }
+    ensure_regular_file_or_absent(path)?;
     let mut bak = path.as_os_str().to_owned();
     bak.push(".bak");
     let bak_path = PathBuf::from(bak);
+    ensure_regular_file_or_absent(&bak_path)?;
     fs::copy(path, &bak_path).map_err(|e| format!("Failed to backup {}: {e}", path.display()))?;
     Ok(true)
 }
@@ -178,6 +238,7 @@ fn build_claude_permissions() -> serde_json::Value {
 
 fn bootstrap_claude(verbose: bool) -> Result<(), String> {
     let path = claude_config_path();
+    ensure_regular_file_or_absent(&path)?;
 
     let mut root = if path.exists() {
         let content = fs::read_to_string(&path)
@@ -185,10 +246,6 @@ fn bootstrap_claude(verbose: bool) -> Result<(), String> {
         serde_json::from_str::<serde_json::Value>(&content)
             .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?
     } else {
-        // Ensure parent dir exists
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
         serde_json::json!({})
     };
 
@@ -201,8 +258,7 @@ fn bootstrap_claude(verbose: bool) -> Result<(), String> {
 
     let pretty = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("Failed to serialize Claude config: {e}"))?;
-    fs::write(&path, pretty.as_bytes())
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    write_atomic(&path, &pretty)?;
 
     output::ok(&format!("Claude: {}", path.display()));
     Ok(())
@@ -217,6 +273,7 @@ fn codex_config_path() -> PathBuf {
 
 fn bootstrap_codex(verbose: bool) -> Result<(), String> {
     let path = codex_config_path();
+    ensure_regular_file_or_absent(&path)?;
 
     let mut root = if path.exists() {
         let content = fs::read_to_string(&path)
@@ -225,9 +282,6 @@ fn bootstrap_codex(verbose: bool) -> Result<(), String> {
             .parse::<toml::Value>()
             .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?
     } else {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
         toml::Value::Table(toml::map::Map::new())
     };
 
@@ -245,8 +299,7 @@ fn bootstrap_codex(verbose: bool) -> Result<(), String> {
 
     let content = toml::to_string_pretty(&root)
         .map_err(|e| format!("Failed to serialize Codex config: {e}"))?;
-    fs::write(&path, content.as_bytes())
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    write_atomic(&path, &content)?;
 
     output::ok(&format!("Codex: {}", path.display()));
     Ok(())
@@ -272,6 +325,7 @@ fn build_opencode_permissions() -> serde_json::Value {
 
 fn bootstrap_opencode(verbose: bool) -> Result<(), String> {
     let path = opencode_config_path();
+    ensure_regular_file_or_absent(&path)?;
 
     let mut root = if path.exists() {
         let content = fs::read_to_string(&path)
@@ -279,9 +333,6 @@ fn bootstrap_opencode(verbose: bool) -> Result<(), String> {
         serde_json::from_str::<serde_json::Value>(&content)
             .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?
     } else {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
         serde_json::json!({})
     };
 
@@ -296,8 +347,7 @@ fn bootstrap_opencode(verbose: bool) -> Result<(), String> {
 
     let pretty = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("Failed to serialize OpenCode config: {e}"))?;
-    fs::write(&path, pretty.as_bytes())
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    write_atomic(&path, &pretty)?;
 
     output::ok(&format!("OpenCode: {}", path.display()));
     Ok(())
@@ -317,6 +367,7 @@ fn bootstrap_crush(verbose: bool) -> Result<(), String> {
     let path = crush_config_path();
 
     if path.exists() {
+        ensure_regular_file_or_absent(&path)?;
         if backup_file(&path)? && verbose {
             output::verbose(&format!("Backed up {}", path.display()));
         }
@@ -383,6 +434,103 @@ mod tests {
                 "ask entry {a:?} also appears in allow list"
             );
         }
+    }
+
+    // ── Symlink rejection ────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_target() {
+        let dir = test_dir();
+        let victim = dir.join("victim.json");
+        fs::write(&victim, "KEEP").unwrap();
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let err = ensure_regular_file_or_absent(&link);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("symlink"));
+
+        // victim must be untouched
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "KEEP");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_rejects_symlink_source() {
+        let dir = test_dir();
+        let real = dir.join("real.json");
+        fs::write(&real, "data").unwrap();
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = backup_file(&link);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("symlink"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_rejects_symlink_bak_target() {
+        let dir = test_dir();
+        let file = dir.join("config.json");
+        fs::write(&file, "data").unwrap();
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, "KEEP").unwrap();
+        let bak = dir.join("config.json.bak");
+        std::os::unix::fs::symlink(&victim, &bak).unwrap();
+
+        let err = backup_file(&file);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("symlink"));
+
+        // victim must be untouched
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "KEEP");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Atomic writes ───────────────────────────────────────────
+
+    #[test]
+    fn write_atomic_creates_file() {
+        let dir = test_dir();
+        let path = dir.join("new.json");
+        write_atomic(&path, "content").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "content");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_creates_parent_dirs() {
+        let dir = test_dir();
+        let path = dir.join("sub").join("dir").join("file.json");
+        write_atomic(&path, "nested").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "nested");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_rejects_symlink_destination() {
+        let dir = test_dir();
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, "KEEP").unwrap();
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        // ensure_regular_file_or_absent catches this before write_atomic is called
+        let err = ensure_regular_file_or_absent(&link);
+        assert!(err.is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "KEEP");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── Backup ──────────────────────────────────────────────────
