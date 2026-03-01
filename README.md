@@ -137,7 +137,7 @@ Your real `$HOME` is replaced with a tmpfs. Dotfiles and dotdirs are selectively
 ### Namespace isolation
 
 The sandbox uses PID, UTS, and IPC namespace isolation. The hostname inside is `ai-sandbox`. The process dies when the parent exits (`--die-with-parent`).
-`--new-session` is always enabled. In `--lockdown`, Linux also unshares network.
+Linux enables `--new-session` for non-interactive runs and always in `--lockdown`. In `--lockdown`, Linux also unshares network.
 
 ### mise integration
 

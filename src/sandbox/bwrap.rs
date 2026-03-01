@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::output;
 use std::fs::OpenOptions;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -90,17 +91,21 @@ impl MountSet {
     }
 
     fn isolation_args(&self, project_dir: &Path, lockdown: bool) -> Vec<String> {
+        let use_new_session = should_use_new_session(lockdown);
         let mut args = vec![
             "--chdir".into(),
             project_dir.display().to_string(),
             "--die-with-parent".into(),
-            "--new-session".into(),
             "--unshare-pid".into(),
             "--unshare-uts".into(),
             "--unshare-ipc".into(),
             "--hostname".into(),
             "ai-sandbox".into(),
         ];
+
+        if use_new_session {
+            args.push("--new-session".into());
+        }
 
         if lockdown {
             args.push("--unshare-net".into());
@@ -205,6 +210,13 @@ fn bwrap_binary_path() -> Result<PathBuf, String> {
          Fedora: dnf install bubblewrap"
             .into(),
     )
+}
+
+fn should_use_new_session(lockdown: bool) -> bool {
+    if lockdown {
+        return true;
+    }
+    !std::io::stdin().is_terminal()
 }
 
 fn bwrap_program_for_exec() -> PathBuf {
@@ -787,10 +799,14 @@ mod tests {
         let args = build_dry_run_args(&config, &project, guard.hosts_path(), false);
 
         assert!(args.contains(&"--die-with-parent".to_string()));
-        assert!(args.contains(&"--new-session".to_string()));
         assert!(args.contains(&"--unshare-pid".to_string()));
         assert!(args.contains(&"--unshare-uts".to_string()));
         assert!(args.contains(&"--unshare-ipc".to_string()));
+        assert_eq!(
+            args.contains(&"--new-session".to_string()),
+            should_use_new_session(false),
+            "new-session presence should follow tty/lockdown policy",
+        );
     }
 
     #[test]
@@ -852,6 +868,11 @@ mod tests {
         let meta = std::fs::metadata(guard.hosts_path()).unwrap();
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn lockdown_always_uses_new_session() {
+        assert!(should_use_new_session(true));
     }
 
     #[test]
