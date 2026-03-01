@@ -1,3 +1,6 @@
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("ai-jail only supports Linux and macOS");
+
 mod bootstrap;
 mod cli;
 mod config;

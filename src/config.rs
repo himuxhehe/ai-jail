@@ -653,10 +653,7 @@ another_removed_field = true
         let original_dir = std::env::current_dir().unwrap();
         let victim = dir.join("victim.txt");
         std::fs::write(&victim, "KEEP").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&victim, dir.join(".ai-jail")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&victim, dir.join(".ai-jail")).unwrap();
         std::env::set_current_dir(&dir).unwrap();
 
         let config = Config {

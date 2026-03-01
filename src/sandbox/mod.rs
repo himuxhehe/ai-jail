@@ -11,8 +11,6 @@ mod seatbelt;
 pub use bwrap::SandboxGuard;
 #[cfg(target_os = "macos")]
 pub use seatbelt::SandboxGuard;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub struct SandboxGuard;
 
 // Dotdirs never mounted (sensitive data)
 const DOTDIR_DENY: &[&str] = &[".gnupg", ".aws", ".ssh", ".mozilla", ".basilisk-dev", ".sparrow"];
@@ -103,10 +101,6 @@ pub fn check() -> Result<(), String> {
     {
         seatbelt::check()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err("ai-jail is only supported on Linux and macOS".into())
-    }
 }
 
 pub fn prepare() -> Result<SandboxGuard, String> {
@@ -117,10 +111,6 @@ pub fn prepare() -> Result<SandboxGuard, String> {
     #[cfg(target_os = "macos")]
     {
         Ok(seatbelt::SandboxGuard)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Ok(SandboxGuard)
     }
 }
 
@@ -148,11 +138,6 @@ pub fn build(guard: &SandboxGuard, config: &Config, project_dir: &Path, verbose:
         let _ = guard;
         seatbelt::build(config, project_dir, verbose)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (guard, config, project_dir, verbose);
-        unreachable!("check() prevents reaching here on unsupported platforms")
-    }
 }
 
 pub fn dry_run(guard: &SandboxGuard, config: &Config, project_dir: &Path, verbose: bool) -> String {
@@ -164,11 +149,6 @@ pub fn dry_run(guard: &SandboxGuard, config: &Config, project_dir: &Path, verbos
     {
         let _ = guard;
         seatbelt::dry_run(config, project_dir, verbose)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (guard, config, project_dir, verbose);
-        unreachable!("check() prevents reaching here on unsupported platforms")
     }
 }
 

@@ -239,6 +239,47 @@ When CLI flags and an existing config are both present:
 
 When a boolean field is not set, the feature is enabled if the resource exists on the host.
 
+## Windows
+
+ai-jail doesn't support Windows natively and probably never will. The sandbox depends on Linux namespaces (via bwrap) and macOS seatbelt profiles (via sandbox-exec). Windows has nothing equivalent in userspace. AppContainers exist but they're a completely different API, need admin privileges for setup, and the security model doesn't map to what bwrap does. A Windows port would be a separate project, not a backend swap.
+
+If you're on Windows, run ai-jail inside WSL 2. WSL 2 runs a real Linux kernel, so bwrap works normally.
+
+### Setup
+
+1. Install WSL 2 if you haven't:
+
+```powershell
+wsl --install
+```
+
+2. Open your WSL distro (Ubuntu by default) and install bubblewrap:
+
+```bash
+sudo apt update && sudo apt install bubblewrap
+```
+
+3. Build ai-jail from source inside WSL:
+
+```bash
+cd ~/Projects
+git clone https://github.com/nicholasgasior/ai-jail.git
+cd ai-jail
+cargo build --release
+cp target/release/ai-jail ~/.local/bin/
+```
+
+4. Run it from inside WSL against your project directory:
+
+```bash
+cd /mnt/c/Users/you/Projects/my-app
+ai-jail claude
+```
+
+WSL 2 mounts your Windows drives under `/mnt/c/`, `/mnt/d/`, etc. The sandbox sees the Linux filesystem, so all the mount isolation works as expected. Your Windows files are accessible through those mount points.
+
+One thing to watch: WSL 2 filesystem performance is slower on `/mnt/c/` (the Windows side) than on the native Linux filesystem (`~/`). For large projects, cloning into `~/Projects/` inside WSL instead of working from `/mnt/c/` makes a noticeable difference.
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
