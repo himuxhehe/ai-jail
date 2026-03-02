@@ -27,7 +27,9 @@ const DOTDIR_DENY: &[&str] = &[
 // Dotdirs requiring read-write access
 const DOTDIR_RW: &[&str] = &[
     ".claude", ".crush", ".codex", ".aider", ".config", ".cargo", ".cache",
-    ".docker",
+    ".docker", ".bundle", ".gem", ".rustup", ".npm", ".bun", ".deno",
+    ".yarn", ".pnpm", ".m2", ".gradle", ".dotnet", ".nuget", ".pub-cache",
+    ".mix", ".hex",
 ];
 
 #[derive(Debug, Clone)]
