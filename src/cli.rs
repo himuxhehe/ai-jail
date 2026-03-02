@@ -48,6 +48,9 @@ pub struct CliArgs {
     pub bootstrap: bool,
     pub verbose: bool,
     pub status: bool,
+    /// Internal: apply Landlock and exec remaining command.
+    /// Used as a wrapper inside the bwrap sandbox.
+    pub landlock_exec: bool,
 }
 
 pub fn parse() -> Result<CliArgs, String> {
@@ -83,6 +86,7 @@ pub fn parse_from(mut parser: lexopt::Parser) -> Result<CliArgs, String> {
             Long("no-display") => args.display = Some(false),
             Long("mise") => args.mise = Some(true),
             Long("no-mise") => args.mise = Some(false),
+            Long("landlock-exec") => args.landlock_exec = true,
             Long("clean") => args.clean = true,
             Long("dry-run") => args.dry_run = true,
             Long("init") => args.init = true,
@@ -365,6 +369,33 @@ mod tests {
     fn parse_rw_map_missing_value_errors() {
         let result = parse_test(&["--rw-map"]);
         assert!(result.is_err());
+    }
+
+    // ── Internal flags ─────────────────────────────────────────
+
+    #[test]
+    fn parse_landlock_exec() {
+        let args =
+            parse_test(&["--landlock-exec", "--", "claude", "--continue"])
+                .unwrap();
+        assert!(args.landlock_exec);
+        assert_eq!(args.command, vec!["claude", "--continue"]);
+    }
+
+    #[test]
+    fn parse_landlock_exec_with_lockdown() {
+        let args = parse_test(&[
+            "--landlock-exec",
+            "--lockdown",
+            "--verbose",
+            "--",
+            "bash",
+        ])
+        .unwrap();
+        assert!(args.landlock_exec);
+        assert_eq!(args.lockdown, Some(true));
+        assert!(args.verbose);
+        assert_eq!(args.command, vec!["bash"]);
     }
 
     // ── Dash-dash separator ────────────────────────────────────

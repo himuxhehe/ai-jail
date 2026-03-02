@@ -8,8 +8,38 @@ mod output;
 mod sandbox;
 mod signals;
 
+fn run_landlock_exec(cli: &cli::CliArgs) -> Result<i32, String> {
+    use std::os::unix::process::CommandExt;
+
+    if cli.command.is_empty() {
+        return Err("--landlock-exec requires a command".into());
+    }
+
+    let project_dir = std::env::current_dir()
+        .map_err(|e| format!("Cannot determine current directory: {e}"))?;
+
+    // Load config from .ai-jail in project dir (cwd inside sandbox)
+    let existing = config::load();
+    let config = config::merge(cli, existing);
+
+    // Apply Landlock inside the sandbox (after bwrap namespace setup)
+    sandbox::apply_landlock(&config, &project_dir, cli.verbose);
+
+    // Replace this process with the real command
+    let err = std::process::Command::new(&cli.command[0])
+        .args(&cli.command[1..])
+        .exec();
+
+    Err(format!("Failed to exec {}: {err}", cli.command[0]))
+}
+
 fn run() -> Result<i32, String> {
     let cli = cli::parse()?;
+
+    // Internal: apply Landlock and exec (used inside bwrap sandbox)
+    if cli.landlock_exec {
+        return run_landlock_exec(&cli);
+    }
 
     // Load or skip config
     let existing = if cli.clean {
@@ -70,13 +100,11 @@ fn run() -> Result<i32, String> {
     // Install signal handlers before spawning
     signals::install_handlers();
 
-    // Build bwrap command (reads $HOME, /dev, etc. for mount discovery)
+    // Build bwrap command (reads $HOME, /dev, etc. for mount discovery).
+    // When Landlock is enabled, the inner command is wrapped with
+    // `ai-jail --landlock-exec` so Landlock is applied INSIDE the
+    // sandbox after bwrap finishes mount namespace setup.
     let mut cmd = sandbox::build(&guard, &config, &project_dir, cli.verbose);
-
-    // Apply Landlock LSM restrictions (Linux 5.13+, best-effort).
-    // Must be after build() so mount discovery can read directories,
-    // but before spawn() so bwrap inherits the restrictions.
-    sandbox::apply_landlock(&config, &project_dir, cli.verbose);
 
     let child = cmd
         .spawn()

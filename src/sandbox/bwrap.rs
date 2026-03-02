@@ -219,6 +219,18 @@ const BWRAP_ENV_VAR: &str = "BWRAP_BIN";
 const BWRAP_CANDIDATES: &[&str] =
     &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 
+/// Fixed path inside the sandbox where ai-jail is bind-mounted
+/// for the Landlock wrapper.  Lives under /tmp (always a fresh
+/// tmpfs in the sandbox) so it works regardless of where the host
+/// binary is installed.
+const LANDLOCK_WRAPPER_DEST: &str = "/tmp/.ai-jail-landlock";
+
+fn self_binary_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+}
+
 pub(crate) fn bwrap_binary_path() -> Result<PathBuf, String> {
     let mut override_error: Option<String> = None;
 
@@ -338,16 +350,50 @@ pub fn build(
     let bwrap = bwrap_program_for_exec();
     let launch = super::build_launch_command(config);
 
+    // Landlock wrapper: bind-mount ai-jail into /tmp inside the
+    // sandbox so it can apply Landlock after bwrap namespace setup.
+    let wrapper = if config.landlock_enabled() {
+        self_binary_path()
+    } else {
+        None
+    };
+
     let mut cmd = Command::new(bwrap);
 
     for arg in mount_set.all_mount_args() {
         cmd.arg(arg);
     }
+
+    // Self binary mount for Landlock wrapper (after all other
+    // mounts so /tmp tmpfs already exists)
+    if wrapper.is_some() {
+        let m = Mount::FileRoBind {
+            src: wrapper.clone().unwrap(),
+            dest: PathBuf::from(LANDLOCK_WRAPPER_DEST),
+        };
+        for arg in m.to_args() {
+            cmd.arg(arg);
+        }
+    }
+
     for arg in mount_set.isolation_args(project_dir, lockdown) {
         cmd.arg(arg);
     }
 
     cmd.arg("--");
+
+    if wrapper.is_some() {
+        cmd.arg(LANDLOCK_WRAPPER_DEST);
+        cmd.arg("--landlock-exec");
+        if lockdown {
+            cmd.arg("--lockdown");
+        }
+        if verbose {
+            cmd.arg("--verbose");
+        }
+        cmd.arg("--");
+    }
+
     cmd.arg(&launch.program);
     for arg in &launch.args {
         cmd.arg(arg);
@@ -380,9 +426,37 @@ fn build_dry_run_args(
         vec![bwrap_program_for_exec().display().to_string()];
 
     args.extend(mount_set.all_mount_args());
+
+    // Self binary mount for Landlock wrapper
+    let wrapper = if config.landlock_enabled() {
+        self_binary_path()
+    } else {
+        None
+    };
+    if let Some(ref self_bin) = wrapper {
+        let m = Mount::FileRoBind {
+            src: self_bin.clone(),
+            dest: PathBuf::from(LANDLOCK_WRAPPER_DEST),
+        };
+        args.extend(m.to_args());
+    }
+
     args.extend(mount_set.isolation_args(project_dir, lockdown));
 
     args.push("--".into());
+
+    if wrapper.is_some() {
+        args.push(LANDLOCK_WRAPPER_DEST.into());
+        args.push("--landlock-exec".into());
+        if lockdown {
+            args.push("--lockdown".into());
+        }
+        if verbose {
+            args.push("--verbose".into());
+        }
+        args.push("--".into());
+    }
+
     args.push(launch.program);
     args.extend(launch.args);
 
@@ -996,6 +1070,55 @@ mod tests {
         assert!(
             args.first().is_some_and(|s| s.starts_with('/')),
             "dry-run must show absolute bwrap path"
+        );
+    }
+
+    #[test]
+    fn landlock_wrapper_in_dry_run() {
+        let config = minimal_test_config();
+        assert!(config.landlock_enabled());
+        let guard =
+            SandboxGuard::test_with_hosts(PathBuf::from("/tmp/test-hosts"));
+        let project = PathBuf::from("/home/user/project");
+        let args =
+            build_dry_run_args(&config, &project, guard.hosts_path(), false);
+
+        // Should contain the wrapper dest path
+        assert!(
+            args.contains(&LANDLOCK_WRAPPER_DEST.to_string()),
+            "dry-run must include Landlock wrapper path"
+        );
+        assert!(
+            args.contains(&"--landlock-exec".to_string()),
+            "dry-run must include --landlock-exec"
+        );
+
+        // Two -- separators: one for bwrap, one for wrapper
+        let seps: Vec<_> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--")
+            .collect();
+        assert!(
+            seps.len() >= 2,
+            "expected at least 2 -- separators, got {}",
+            seps.len()
+        );
+    }
+
+    #[test]
+    fn no_landlock_wrapper_when_disabled() {
+        let mut config = minimal_test_config();
+        config.no_landlock = Some(true);
+        let guard =
+            SandboxGuard::test_with_hosts(PathBuf::from("/tmp/test-hosts"));
+        let project = PathBuf::from("/home/user/project");
+        let args =
+            build_dry_run_args(&config, &project, guard.hosts_path(), false);
+
+        assert!(
+            !args.contains(&"--landlock-exec".to_string()),
+            "dry-run must NOT include --landlock-exec when disabled"
         );
     }
 
