@@ -5,8 +5,10 @@ mod bootstrap;
 mod cli;
 mod config;
 mod output;
+mod pty;
 mod sandbox;
 mod signals;
+mod statusbar;
 
 fn run_landlock_exec(cli: &cli::CliArgs) -> Result<i32, String> {
     use std::os::unix::process::CommandExt;
@@ -41,19 +43,25 @@ fn run() -> Result<i32, String> {
         return run_landlock_exec(&cli);
     }
 
-    // Load or skip config
-    let existing = if cli.clean {
+    // Load global ($HOME/.ai-jail) then local (./.ai-jail), merge
+    let global = config::load_global();
+    let local = if cli.clean {
         config::Config::default()
     } else {
         config::load()
     };
-
+    let existing = config::merge_with_global(global, local);
     let config = config::merge(&cli, existing);
 
     // Handle status command
     if cli.status {
         config::display_status(&config);
         return Ok(0);
+    }
+
+    // Persist user-level preferences (status bar) to $HOME/.ai-jail
+    if cli.status_bar.is_some() || cli.status_bar_style.is_some() {
+        config::save_global(&config);
     }
 
     // Handle --init: save config and exit
@@ -100,25 +108,49 @@ fn run() -> Result<i32, String> {
     // Install signal handlers before spawning
     signals::install_handlers();
 
+    // Set up status bar if enabled and stdout is a terminal
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let use_status_bar = config.status_bar_enabled() && stdout_is_tty;
+    if cli.verbose {
+        if config.status_bar_enabled() {
+            if stdout_is_tty {
+                output::verbose("Status bar: enabled");
+            } else {
+                output::verbose("Status bar: skipped (stdout is not a tty)");
+            }
+        } else {
+            output::verbose("Status bar: off (use --status-bar)");
+        }
+    }
+    if use_status_bar {
+        statusbar::setup(&project_dir, config.status_bar_style());
+    }
+
     // Build bwrap command (reads $HOME, /dev, etc. for mount discovery).
     // When Landlock is enabled, the inner command is wrapped with
     // `ai-jail --landlock-exec` so Landlock is applied INSIDE the
     // sandbox after bwrap finishes mount namespace setup.
     let mut cmd = sandbox::build(&guard, &config, &project_dir, cli.verbose);
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start sandbox: {e}"))?;
+    let exit_code = if use_status_bar {
+        // PTY proxy path: ai-jail owns the real terminal, child
+        // gets a PTY slave. This keeps the status bar persistent.
+        let code = pty::run(&mut cmd)?;
+        statusbar::teardown();
+        code
+    } else {
+        // Direct spawn path (no status bar)
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start sandbox: {e}"))?;
 
-    let pid = child.id() as i32;
-    signals::set_child_pid(pid);
+        let pid = child.id() as i32;
+        signals::set_child_pid(pid);
 
-    // Wait for child via nix (handles EINTR correctly)
-    let exit_code = signals::wait_child(pid);
-
-    // Explicitly forget the std::process::Child since we already waited via nix.
-    // This prevents a double-wait.
-    std::mem::forget(child);
+        let code = signals::wait_child(pid);
+        std::mem::forget(child);
+        code
+    };
 
     // Guard is dropped here, cleaning up any temp files
     drop(guard);

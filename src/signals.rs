@@ -15,6 +15,10 @@ extern "C" fn forward_signal(sig: nix::libc::c_int) {
             nix::libc::kill(pid, sig);
         }
     }
+    if sig == nix::libc::SIGWINCH {
+        crate::statusbar::redraw();
+        crate::pty::resize_pty();
+    }
 }
 
 pub fn install_handlers() {
@@ -24,7 +28,12 @@ pub fn install_handlers() {
         SigSet::empty(),
     );
 
-    for sig in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+    for sig in [
+        Signal::SIGINT,
+        Signal::SIGTERM,
+        Signal::SIGHUP,
+        Signal::SIGWINCH,
+    ] {
         unsafe {
             let _ = signal::sigaction(sig, &action);
         }
