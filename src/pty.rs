@@ -42,6 +42,27 @@ pub fn resize_pty() {
     }
 }
 
+/// Forward SIGWINCH to the PTY foreground process group.
+/// Returns true if forwarding was attempted.
+pub fn forward_sigwinch() -> bool {
+    let master = MASTER_FD.load(Ordering::SeqCst);
+    if master < 0 {
+        return false;
+    }
+
+    let mut pgrp: nix::libc::pid_t = 0;
+    let ret =
+        unsafe { nix::libc::ioctl(master, nix::libc::TIOCGPGRP, &mut pgrp) };
+    if ret != 0 || pgrp <= 0 {
+        return false;
+    }
+
+    unsafe {
+        nix::libc::kill(-pgrp, nix::libc::SIGWINCH);
+    }
+    true
+}
+
 fn enter_raw_mode() -> Result<Termios, String> {
     let stdin = std::io::stdin();
     let saved =
@@ -58,6 +79,22 @@ fn restore_mode(saved: &Termios) {
     let _ = termios::tcsetattr(&stdin, SetArg::TCSANOW, saved);
 }
 
+struct RawModeGuard(Option<Termios>);
+
+impl RawModeGuard {
+    fn new(saved: Termios) -> Self {
+        Self(Some(saved))
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if let Some(saved) = self.0.take() {
+            restore_mode(&saved);
+        }
+    }
+}
+
 fn set_initial_size(fd: &OwnedFd, rows: u16, cols: u16) {
     let ws = nix::libc::winsize {
         ws_row: rows,
@@ -70,64 +107,150 @@ fn set_initial_size(fd: &OwnedFd, rows: u16, cols: u16) {
     }
 }
 
-/// Scan for escape sequences that reset the scroll region.
-///
-/// Detected sequences:
-/// - `\x1b[r` / `\x1b[;r` — bare DECSTBM reset
-/// - `\x1bc` — RIS (full terminal reset)
-/// - `\x1b[?1049h/l`, `\x1b[?47h/l`, `\x1b[?1047h/l` — alt screen
-#[cfg(test)]
-fn contains_scroll_reset(data: &[u8]) -> bool {
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] != 0x1b {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        if i >= data.len() {
-            break;
-        }
-        match data[i] {
-            b'c' => return true,
-            b'[' => {
-                i += 1;
-                let ps = i;
-                // Parameter bytes: 0x30..=0x3f (digits ; ? etc)
-                while i < data.len() && (0x30..=0x3f).contains(&data[i]) {
-                    i += 1;
-                }
-                let params = &data[ps..i];
-                // Intermediate bytes: 0x20..=0x2f
-                while i < data.len() && (0x20..=0x2f).contains(&data[i]) {
-                    i += 1;
-                }
-                if i >= data.len() {
-                    break;
-                }
-                let fin = data[i];
-                i += 1;
-                // Bare DECSTBM reset: \x1b[r or \x1b[;r
-                if fin == b'r' && (params.is_empty() || params == b";") {
-                    return true;
-                }
-                // Private mode set/reset with ? prefix
-                if (fin == b'h' || fin == b'l') && params.first() == Some(&b'?')
-                {
-                    let modes = &params[1..];
-                    for part in modes.split(|&b| b == b';') {
-                        if part == b"1049" || part == b"47" || part == b"1047" {
-                            return true;
-                        }
-                    }
-                }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetEvent {
+    None,
+    Redraw,
+    RedrawAndClamp,
+}
+
+impl ResetEvent {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (ResetEvent::RedrawAndClamp, _)
+            | (_, ResetEvent::RedrawAndClamp) => ResetEvent::RedrawAndClamp,
+            (ResetEvent::Redraw, _) | (_, ResetEvent::Redraw) => {
+                ResetEvent::Redraw
             }
-            _ => {
-                i += 1;
-            }
+            _ => ResetEvent::None,
         }
     }
-    false
+}
+
+#[derive(Clone, Copy)]
+enum ResetScanState {
+    Normal,
+    Esc,
+    Csi,
+    CsiInter,
+}
+
+/// Incremental scanner for sequences that reset scroll region state.
+struct ResetDetector {
+    state: ResetScanState,
+    params: [u8; 64],
+    params_len: usize,
+    params_overflow: bool,
+}
+
+impl ResetDetector {
+    fn new() -> Self {
+        Self {
+            state: ResetScanState::Normal,
+            params: [0u8; 64],
+            params_len: 0,
+            params_overflow: false,
+        }
+    }
+
+    fn push_param(&mut self, b: u8) {
+        if self.params_len < self.params.len() {
+            self.params[self.params_len] = b;
+            self.params_len += 1;
+        } else {
+            self.params_overflow = true;
+        }
+    }
+
+    fn finish_csi(&self, fin: u8) -> ResetEvent {
+        if self.params_overflow {
+            return ResetEvent::None;
+        }
+        let params = &self.params[..self.params_len];
+
+        // Bare DECSTBM reset: \x1b[r or \x1b[;r
+        if fin == b'r' && (params.is_empty() || params == b";") {
+            return ResetEvent::RedrawAndClamp;
+        }
+
+        // Alt-screen modes:
+        //   ...h = enter alt-screen (needs redraw)
+        //   ...l = leave alt-screen (needs redraw + clamp cursor)
+        if (fin == b'h' || fin == b'l') && params.first() == Some(&b'?') {
+            let mut found = false;
+            for part in params[1..].split(|&b| b == b';') {
+                if part == b"1049" || part == b"47" || part == b"1047" {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                return if fin == b'l' {
+                    ResetEvent::RedrawAndClamp
+                } else {
+                    ResetEvent::Redraw
+                };
+            }
+        }
+
+        ResetEvent::None
+    }
+
+    /// Scan output bytes and report whether we should redraw/reclamp.
+    fn scan(&mut self, data: &[u8]) -> ResetEvent {
+        let mut ev = ResetEvent::None;
+        for &b in data {
+            match self.state {
+                ResetScanState::Normal => {
+                    if b == 0x1b {
+                        self.state = ResetScanState::Esc;
+                    }
+                }
+                ResetScanState::Esc => match b {
+                    b'c' => {
+                        ev = ev.merge(ResetEvent::RedrawAndClamp);
+                        self.state = ResetScanState::Normal;
+                    }
+                    b'[' => {
+                        self.state = ResetScanState::Csi;
+                        self.params_len = 0;
+                        self.params_overflow = false;
+                    }
+                    0x20..=0x2f => {}
+                    0x1b => {}
+                    _ => {
+                        self.state = ResetScanState::Normal;
+                    }
+                },
+                ResetScanState::Csi => match b {
+                    0x30..=0x3f => self.push_param(b),
+                    0x20..=0x2f => self.state = ResetScanState::CsiInter,
+                    0x40..=0x7e => {
+                        ev = ev.merge(self.finish_csi(b));
+                        self.state = ResetScanState::Normal;
+                    }
+                    0x1b => self.state = ResetScanState::Esc,
+                    _ => self.state = ResetScanState::Normal,
+                },
+                ResetScanState::CsiInter => match b {
+                    0x20..=0x2f => {}
+                    0x40..=0x7e => {
+                        ev = ev.merge(self.finish_csi(b));
+                        self.state = ResetScanState::Normal;
+                    }
+                    0x1b => self.state = ResetScanState::Esc,
+                    _ => self.state = ResetScanState::Normal,
+                },
+            }
+        }
+        ev
+    }
+}
+
+#[cfg(test)]
+fn contains_scroll_reset(data: &[u8]) -> bool {
+    let mut detector = ResetDetector::new();
+    !matches!(detector.scan(data), ResetEvent::None)
 }
 
 /// Tracks whether the child output stream is mid-escape-sequence.
@@ -180,6 +303,8 @@ fn io_loop(master: &OwnedFd) {
     let master_bfd = unsafe { BorrowedFd::borrow_raw(master_raw) };
     let mut buf = [0u8; 8192];
     let mut seq = SeqState::Normal;
+    let mut reset = ResetDetector::new();
+    let mut pending_clamp = false;
 
     loop {
         let mut fds = [
@@ -189,10 +314,14 @@ fn io_loop(master: &OwnedFd) {
 
         match poll(&mut fds, PollTimeout::from(100_u16)) {
             Ok(0) => {
-                // Timeout — if we deferred a redraw, do it now
-                if !matches!(seq, SeqState::Normal) {
-                    seq = SeqState::Normal;
+                if matches!(seq, SeqState::Normal)
+                    && crate::statusbar::take_dirty()
+                {
                     crate::statusbar::redraw();
+                    if pending_clamp {
+                        crate::statusbar::clamp_cursor();
+                        pending_clamp = false;
+                    }
                 }
                 continue;
             }
@@ -208,9 +337,17 @@ fn io_loop(master: &OwnedFd) {
                     Ok(0) => break,
                     Ok(n) => {
                         write_all_raw(nix::libc::STDOUT_FILENO, &buf[..n]);
+                        let ev = reset.scan(&buf[..n]);
+                        if matches!(ev, ResetEvent::RedrawAndClamp) {
+                            pending_clamp = true;
+                        }
                         seq.update(&buf[..n]);
                         if matches!(seq, SeqState::Normal) {
                             crate::statusbar::redraw();
+                            if pending_clamp {
+                                crate::statusbar::clamp_cursor();
+                                pending_clamp = false;
+                            }
                         }
                     }
                     Err(nix::errno::Errno::EINTR) => {}
@@ -226,7 +363,26 @@ fn io_loop(master: &OwnedFd) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             write_all_raw(nix::libc::STDOUT_FILENO, &buf[..n]);
+                            let ev = reset.scan(&buf[..n]);
+                            if matches!(ev, ResetEvent::RedrawAndClamp) {
+                                pending_clamp = true;
+                            }
+                            seq.update(&buf[..n]);
+                            if matches!(seq, SeqState::Normal) {
+                                crate::statusbar::redraw();
+                                if pending_clamp {
+                                    crate::statusbar::clamp_cursor();
+                                    pending_clamp = false;
+                                }
+                            }
                         }
+                    }
+                }
+                let dirty = crate::statusbar::take_dirty();
+                if pending_clamp || dirty || matches!(seq, SeqState::Normal) {
+                    crate::statusbar::redraw();
+                    if pending_clamp {
+                        crate::statusbar::clamp_cursor();
                     }
                 }
                 break;
@@ -299,11 +455,9 @@ pub fn run(cmd: &mut std::process::Command) -> Result<i32, String> {
     // Set initial PTY size (rows-1 for status bar)
     set_initial_size(&master, rows - 1, cols);
 
-    // Store master raw FD for signal handler
-    MASTER_FD.store(master_raw, Ordering::SeqCst);
-
     // Enter raw mode on real stdin
     let saved = enter_raw_mode()?;
+    let raw_mode_guard = RawModeGuard::new(saved);
 
     // Configure child to use PTY slave as stdin/stdout/stderr
     let slave_raw = slave.as_raw_fd();
@@ -332,6 +486,7 @@ pub fn run(cmd: &mut std::process::Command) -> Result<i32, String> {
 
     let pid = child.id() as i32;
     crate::signals::set_child_pid(pid);
+    MASTER_FD.store(master_raw, Ordering::SeqCst);
 
     // Close slave in parent — child has its own copy
     drop(slave);
@@ -342,7 +497,7 @@ pub fn run(cmd: &mut std::process::Command) -> Result<i32, String> {
     // Clean up
     MASTER_FD.store(-1, Ordering::SeqCst);
     drop(master);
-    restore_mode(&saved);
+    drop(raw_mode_guard);
 
     // Wait for child
     let exit_code = crate::signals::wait_child(pid);
@@ -443,5 +598,12 @@ mod tests {
     fn detect_alt_screen_combined_modes() {
         // Some programs set multiple modes at once
         assert!(contains_scroll_reset(b"\x1b[?1049;2004h"));
+    }
+
+    #[test]
+    fn detect_split_alt_screen_exit_across_chunks() {
+        let mut detector = ResetDetector::new();
+        assert!(matches!(detector.scan(b"\x1b[?1049"), ResetEvent::None));
+        assert!(matches!(detector.scan(b"l"), ResetEvent::RedrawAndClamp));
     }
 }

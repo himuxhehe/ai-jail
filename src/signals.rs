@@ -9,15 +9,26 @@ pub fn set_child_pid(pid: i32) {
 }
 
 extern "C" fn forward_signal(sig: nix::libc::c_int) {
+    if sig == nix::libc::SIGWINCH {
+        crate::pty::resize_pty();
+        let forwarded = crate::pty::forward_sigwinch();
+        if !forwarded {
+            let pid = CHILD_PID.load(Ordering::SeqCst);
+            if pid > 0 {
+                unsafe {
+                    nix::libc::kill(pid, sig);
+                }
+            }
+        }
+        crate::statusbar::redraw();
+        return;
+    }
+
     let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
         unsafe {
             nix::libc::kill(pid, sig);
         }
-    }
-    if sig == nix::libc::SIGWINCH {
-        crate::statusbar::redraw();
-        crate::pty::resize_pty();
     }
 }
 

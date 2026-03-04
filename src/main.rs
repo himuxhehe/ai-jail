@@ -108,15 +108,17 @@ fn run() -> Result<i32, String> {
     // Install signal handlers before spawning
     signals::install_handlers();
 
-    // Set up status bar if enabled and stdout is a terminal
+    // Set up status bar if enabled and stdio is attached to a terminal
     let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let use_status_bar = config.status_bar_enabled() && stdout_is_tty;
+    let stdin_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let use_status_bar =
+        config.status_bar_enabled() && stdout_is_tty && stdin_is_tty;
     if cli.verbose {
         if config.status_bar_enabled() {
-            if stdout_is_tty {
+            if stdout_is_tty && stdin_is_tty {
                 output::verbose("Status bar: enabled");
             } else {
-                output::verbose("Status bar: skipped (stdout is not a tty)");
+                output::verbose("Status bar: skipped (stdio is not a tty)");
             }
         } else {
             output::verbose("Status bar: off (use --status-bar)");
@@ -140,9 +142,16 @@ fn run() -> Result<i32, String> {
     let exit_code = if use_status_bar {
         // PTY proxy path: ai-jail owns the real terminal, child
         // gets a PTY slave. This keeps the status bar persistent.
-        let code = pty::run(&mut cmd)?;
-        statusbar::teardown();
-        code
+        match pty::run(&mut cmd) {
+            Ok(code) => {
+                statusbar::teardown();
+                code
+            }
+            Err(e) => {
+                statusbar::teardown();
+                return Err(e);
+            }
+        }
     } else {
         // Direct spawn path (no status bar)
         let child = cmd

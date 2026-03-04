@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static STYLE_DARK: AtomicBool = AtomicBool::new(true);
+static DIRTY: AtomicBool = AtomicBool::new(false);
 
 const MAX_DIR: usize = 4096;
 static mut DIR_BUF: [u8; MAX_DIR] = [0u8; MAX_DIR];
@@ -124,9 +125,35 @@ pub fn setup(project_dir: &std::path::Path, command: &[String], style: &str) {
     }
 
     ACTIVE.store(true, Ordering::SeqCst);
+    DIRTY.store(false, Ordering::SeqCst);
     draw(rows, cols);
 
     // Ensure cursor is within the scroll region.
+    clamp_cursor();
+}
+
+/// Signal that a newer version is available. Triggers redraw.
+pub fn set_update_available() {
+    UPDATE_AVAILABLE.store(true, Ordering::SeqCst);
+    DIRTY.store(true, Ordering::SeqCst);
+}
+
+/// Consume and clear pending redraw request.
+pub fn take_dirty() -> bool {
+    DIRTY.swap(false, Ordering::SeqCst)
+}
+
+/// Clamp the cursor into the scroll region.
+pub fn clamp_cursor() {
+    if !ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some((rows, _)) = term_size() else {
+        return;
+    };
+    if rows < 2 {
+        return;
+    }
     let mut cb = [0u8; 16];
     let mut cp = 0;
     cb[cp..cp + 2].copy_from_slice(b"\x1b[");
@@ -135,12 +162,6 @@ pub fn setup(project_dir: &std::path::Path, command: &[String], style: &str) {
     cb[cp..cp + 3].copy_from_slice(b";1H");
     cp += 3;
     raw_write(&cb[..cp]);
-}
-
-/// Signal that a newer version is available. Triggers redraw.
-pub fn set_update_available() {
-    UPDATE_AVAILABLE.store(true, Ordering::SeqCst);
-    redraw();
 }
 
 /// Spawn a background thread to check GitHub for a newer release.
@@ -198,6 +219,7 @@ pub fn teardown() {
         return;
     }
     ACTIVE.store(false, Ordering::SeqCst);
+    DIRTY.store(false, Ordering::SeqCst);
 
     let rows = term_size().map(|(r, _)| r).unwrap_or(24);
 
