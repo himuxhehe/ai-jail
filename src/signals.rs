@@ -8,6 +8,10 @@ pub fn set_child_pid(pid: i32) {
     CHILD_PID.store(pid, Ordering::SeqCst);
 }
 
+pub fn child_pid() -> i32 {
+    CHILD_PID.load(Ordering::SeqCst)
+}
+
 extern "C" fn forward_signal(sig: nix::libc::c_int) {
     if sig == nix::libc::SIGWINCH {
         // Don't resize the PTY or forward SIGWINCH here.

@@ -456,9 +456,17 @@ fn flush_statusbar_if_safe(
     *pending_redraw = false;
     // Resize the PTY AFTER the scroll region is re-established.
     // TIOCSWINSZ on the master makes the kernel deliver SIGWINCH
-    // to the child, so it redraws onto the clean canvas.
+    // to the PTY foreground process group.  We also send SIGWINCH
+    // directly to the child PID in case the foreground pgrp is a
+    // subprocess (e.g. a shell command spawned by Claude Code).
     if *pending_sigwinch {
         resize_pty();
+        let pid = crate::signals::child_pid();
+        if pid > 0 {
+            unsafe {
+                nix::libc::kill(pid, nix::libc::SIGWINCH);
+            }
+        }
         *pending_sigwinch = false;
     }
 }
@@ -510,6 +518,12 @@ fn io_loop(master: &OwnedFd) {
                     pending_redraw = false;
                     if pending_sigwinch {
                         resize_pty();
+                        let pid = crate::signals::child_pid();
+                        if pid > 0 {
+                            unsafe {
+                                nix::libc::kill(pid, nix::libc::SIGWINCH);
+                            }
+                        }
                         pending_sigwinch = false;
                     }
                 }

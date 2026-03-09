@@ -313,15 +313,12 @@ fn draw(rows: u16, cols: u16) {
     // 1. Save cursor
     put!(b"\x1b7");
 
-    // When terminal height changes, clear the entire visible screen
-    // to remove stale content from the old layout.  The child will
-    // redraw its area after receiving SIGWINCH.  Without this,
-    // growing the terminal leaves old content at the top with a
-    // blank gap before the child's new content at the bottom.
+    // When terminal height changes, clear only the old status bar
+    // row so it doesn't leave a ghost line.  We do NOT clear the
+    // entire screen — the child will repaint its own area when it
+    // receives SIGWINCH from the deferred PTY resize.
     if last_rows > 0 && last_rows != rows {
-        // Temporarily reset scroll region so \x1b[2J clears all
-        // rows, then clear and set the new region below.
-        put!(b"\x1b[r\x1b[2J");
+        write_move_clear_row(last_rows, &mut buf, &mut pos);
     }
 
     // 2. Set scroll region: \x1b[1;{rows-1}r
