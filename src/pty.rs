@@ -146,7 +146,16 @@ fn io_loop(master: &OwnedFd, init_rows: u16, init_cols: u16) {
     let mut pending_redraw = false;
     let mut was_alt_screen = false;
 
-    // Protect status bar with scroll region on primary screen
+    // Push existing terminal content into scrollback so the
+    // child starts on a clean canvas without losing history.
+    // Move cursor to bottom of screen and emit newlines.
+    let pos = format!("\x1b[{};1H", init_rows);
+    write_all_raw(stdout, pos.as_bytes());
+    for _ in 0..content_rows {
+        write_all_raw(stdout, b"\n");
+    }
+    // Clear visible area and set scroll region
+    write_all_raw(stdout, b"\x1b[H\x1b[J");
     set_scroll_region(stdout, content_rows);
 
     loop {
@@ -243,7 +252,11 @@ fn io_loop(master: &OwnedFd, init_rows: u16, init_cols: u16) {
                             write_all_raw(stdout, &buf[..n]);
                             // Re-establish scroll region in case
                             // child output contained a reset.
+                            // DECSTBM moves cursor to home, so
+                            // save/restore around it.
+                            write_all_raw(stdout, b"\x1b7");
                             set_scroll_region(stdout, content_rows);
+                            write_all_raw(stdout, b"\x1b8");
                         }
 
                         prev_screen = screen.clone();
